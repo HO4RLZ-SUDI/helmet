@@ -1,20 +1,16 @@
-# ===============================
-# Helmet AI Detection Server
-# Production-ready Flask version
-# ===============================
-
 from flask import Flask, request, jsonify, render_template
 from flask_cors import CORS
 import cv2
 import numpy as np
 from ultralytics import YOLO
-from datetime import datetime, date
-import threading
+from deepface import DeepFace
+import sqlite3
 import os
+from datetime import datetime
 
-# ===============================
-# APP SETUP
-# ===============================
+# ----------------------
+# SETUP
+# ----------------------
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -24,139 +20,179 @@ app = Flask(
     static_folder=os.path.join(BASE_DIR, "static")
 )
 
-
 CORS(app)
+app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024
 
-# จำกัดขนาดไฟล์ (กัน DoS)
-app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024  # 5MB
-
-
-# ===============================
-# LOAD MODEL (โหลดครั้งเดียว)
-# ===============================
-
-MODEL_PATH = "helmet.pt"
-
-if not os.path.exists(MODEL_PATH):
-    raise FileNotFoundError("❌ helmet.pt not found in project folder")
-
-print("🔄 Loading YOLO model...")
-model = YOLO(MODEL_PATH)
-print("✅ Model loaded!")
+model = YOLO("helmet.pt")
+DB = "helmet.db"
 
 
-# ===============================
-# GLOBAL STATE (thread-safe)
-# ===============================
+# ----------------------
+# DATABASE
+# ----------------------
 
-lock = threading.Lock()
-today_count = 0
-current_date = date.today().isoformat()
+def db():
+    return sqlite3.connect(DB)
 
 
-# ===============================
+def init_db():
+    conn = db()
+    c = conn.cursor()
+
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS users(
+        id INTEGER PRIMARY KEY,
+        name TEXT UNIQUE,
+        encoding BLOB,
+        score INTEGER DEFAULT 100
+    )
+    """)
+
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS logs(
+        id INTEGER PRIMARY KEY,
+        user_id INTEGER,
+        helmet INTEGER,
+        time TEXT
+    )
+    """)
+
+    conn.commit()
+    conn.close()
+
+
+init_db()
+
+
+# ----------------------
+# FACE MATCH
+# ----------------------
+
+def match_face(frame):
+
+    temp = "temp.jpg"
+    cv2.imwrite(temp, frame)
+
+    conn = db()
+    rows = conn.execute("SELECT id,name FROM users").fetchall()
+
+    for uid, name in rows:
+        ref = f"faces/{name}.jpg"
+        if not os.path.exists(ref):
+            continue
+
+        try:
+            result = DeepFace.verify(temp, ref, enforce_detection=False)
+
+            if result["verified"]:
+                conn.close()
+                return uid
+        except:
+            pass
+
+    conn.close()
+    return None
+
+# ----------------------
 # ROUTES
-# ===============================
+# ----------------------
 
 @app.route("/")
 def index():
-    # ใช้ render_template เท่านั้น (ห้าม send_from_directory)
     return render_template("index.html")
 
 
-# -------------------------------
-# DETECTION API
-# -------------------------------
+# ======================
+# REGISTER FACE
+# ======================
+@app.route("/register", methods=["POST"])
+def register():
 
-@app.route("/detect", methods=["POST"])
-def detect():
-    global today_count, current_date
-
-    if "image" not in request.files:
-        return "No image uploaded", 400
-
+    name = request.form["name"]
     file = request.files["image"]
 
-    try:
-        img = np.frombuffer(file.read(), np.uint8)
-        frame = cv2.imdecode(img, cv2.IMREAD_COLOR)
+    os.makedirs("faces", exist_ok=True)
+    path = f"faces/{name}.jpg"
 
-        if frame is None:
-            return "Invalid image", 400
+    file.save(path)
 
-    except Exception:
-        return "Image decode failed", 400
+    conn = db()
+    conn.execute(
+        "INSERT OR IGNORE INTO users(name,score) VALUES (?,100)",
+        (name,)
+    )
+    conn.commit()
+    conn.close()
 
-    # -------- YOLO inference --------
-    try:
-        results = model(frame, conf=0.4)
-    except Exception:
-        return "Model inference error", 500
+    return "registered"
 
-    no_helmet = 0
+# ======================
+# DETECT
+# ======================
+@app.route("/detect", methods=["POST"])
+def detect():
+
+    file = request.files["image"]
+    img = np.frombuffer(file.read(), np.uint8)
+    frame = cv2.imdecode(img, cv2.IMREAD_COLOR)
+
+    results = model(frame, conf=0.4)
+
+    helmet_ok = True
 
     for r in results:
         for box in r.boxes:
-            cls = int(box.cls[0])
-            label = model.names[cls]
-
+            label = model.names[int(box.cls[0])]
             if label.lower() in ["no helmet", "without helmet", "no-helmet"]:
-                no_helmet += 1
-                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                helmet_ok = False
 
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
-                cv2.putText(
-                    frame,
-                    "NO HELMET",
-                    (x1, y1 - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    (0, 0, 255),
-                    2
-                )
+    user_id = match_face(frame)
 
-    # -------- reset count per day --------
-    today = date.today().isoformat()
+    if user_id:
+        conn = db()
 
-    with lock:
-        if today != current_date:
-            today_count = 0
-            current_date = today
+        if not helmet_ok:
+            conn.execute(
+                "UPDATE users SET score = score - 5 WHERE id=?",
+                (user_id,)
+            )
 
-        today_count += no_helmet
+        conn.execute(
+            "INSERT INTO logs(user_id,helmet,time) VALUES (?,?,?)",
+            (user_id, int(helmet_ok), datetime.now().isoformat())
+        )
 
-    # -------- return processed image --------
+        conn.commit()
+        conn.close()
+
     _, jpg = cv2.imencode(".jpg", frame)
-
-    return jpg.tobytes(), 200, {
-        "Content-Type": "image/jpeg"
-    }
+    return jpg.tobytes(), 200, {"Content-Type": "image/jpeg"}
 
 
-# -------------------------------
-# STATS API
-# -------------------------------
-
+# ======================
+# STATS
+# ======================
 @app.route("/stats")
 def stats():
+
+    conn = db()
+
+    users = conn.execute(
+        "SELECT name,score FROM users ORDER BY score DESC"
+    ).fetchall()
+
+    today = conn.execute("""
+        SELECT COUNT(*) FROM logs
+        WHERE helmet = 0 AND date(time)=date('now')
+    """).fetchone()[0]
+
+    conn.close()
+
     return jsonify({
-        "date": current_date,
-        "no_helmet": today_count,
-        "time": datetime.now().strftime("%H:%M:%S")
+        "users": [{"name":u[0],"score":u[1]} for u in users],
+        "violations": today
     })
 
 
-# ===============================
-# MAIN
-# ===============================
-
 if __name__ == "__main__":
-    print("\n🚀 Helmet AI Server Started")
-    print("🌐 http://localhost:5000\n")
-
-    app.run(
-        host="0.0.0.0",
-        port=5000,
-        debug=False,   # ห้ามเปิด production
-        threaded=True
-    )
+    app.run(host="0.0.0.0", port=5000, debug=False)

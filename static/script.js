@@ -1,139 +1,80 @@
 const video = document.getElementById("camera");
-let stream = null;
-let running = false;
+let stream=null,running=false;
 
-const canvas = document.createElement("canvas");
-const ctx = canvas.getContext("2d");
+const canvas=document.createElement("canvas");
+const ctx=canvas.getContext("2d");
 
-let history = [];
-
-
-/* ======================
-   CAMERA
-====================== */
-
-async function startCamera() {
-    if (running) return;
-
-    stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "environment" },
-        audio: false
-    });
-
-    video.srcObject = stream;
-    await video.play();
-
-    running = true;
-    loop();
+async function startCamera(){
+stream=await navigator.mediaDevices.getUserMedia({video:true});
+video.srcObject=stream;
+running=true;
+loop();
 }
 
-function stopCamera() {
-    running = false;
-
-    if (stream) {
-        stream.getTracks().forEach(t => t.stop());
-        stream = null;
-    }
+function stopCamera(){
+running=false;
+if(stream) stream.getTracks().forEach(t=>t.stop());
 }
 
-
-/* ======================
-   LOOP (แทน setInterval)
-====================== */
-
-async function loop() {
-    while (running) {
-        await captureAndSend();
-        await new Promise(r => setTimeout(r, 1500)); // 1.5s safer
-    }
+async function loop(){
+while(running){
+await capture("/detect");
+await new Promise(r=>setTimeout(r,1500));
+}
 }
 
+async function capture(url){
+canvas.width=video.videoWidth;
+canvas.height=video.videoHeight;
+ctx.drawImage(video,0,0);
 
-async function captureAndSend() {
-    if (!video.videoWidth) return;
+const blob=await new Promise(r=>canvas.toBlob(r,"image/jpeg"));
+const f=new FormData();
+f.append("image",blob);
 
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-
-    ctx.drawImage(video, 0, 0);
-
-    const blob = await new Promise(r =>
-        canvas.toBlob(r, "image/jpeg", 0.7)
-    );
-
-    const form = new FormData();
-    form.append("image", blob);
-
-    const res = await fetch("/detect", {
-        method: "POST",
-        body: form
-    });
-
-    if (!res.ok) return;
-
-    const imgBlob = await res.blob();
-
-    if (video.poster) URL.revokeObjectURL(video.poster);
-    video.poster = URL.createObjectURL(imgBlob);
+return fetch(url,{method:"POST",body:f});
 }
 
+async function registerFace(){
+const name=document.getElementById("reg-name").value;
+if(!name) return alert("Enter name");
 
-/* ======================
-   DASHBOARD
-====================== */
+canvas.width=video.videoWidth;
+canvas.height=video.videoHeight;
+ctx.drawImage(video,0,0);
 
-async function loadDashboard() {
-    const res = await fetch("/stats");
-    if (!res.ok) return;
+const blob=await new Promise(r=>canvas.toBlob(r,"image/jpeg"));
 
-    const data = await res.json();
+const f=new FormData();
+f.append("image",blob);
+f.append("name",name);
 
-    document.getElementById("count").innerText = data.no_helmet;
-    document.getElementById("date").innerText = data.date;
-
-    history.push(data.no_helmet);
-    if (history.length > 30) history.shift();
-
-    drawChart();
+await fetch("/register",{method:"POST",body:f});
+alert("Registered!");
 }
 
-setInterval(loadDashboard, 2000);
+async function loadUsers(){
+const res=await fetch("/stats");
+const data=await res.json();
 
+document.getElementById("count").innerText=data.violations;
 
-function drawChart() {
-    const c = document.getElementById("chart");
-    const ctx = c.getContext("2d");
+const div=document.getElementById("user-list");
+div.innerHTML="";
 
-    ctx.clearRect(0, 0, c.width, c.height);
-
-    const max = Math.max(...history, 1);
-
-    ctx.beginPath();
-
-    history.forEach((v, i) => {
-        const x = i * (c.width / history.length);
-        const y = c.height - (v / max) * c.height;
-
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-    });
-
-    ctx.stroke();
+data.users.forEach(u=>{
+div.innerHTML+=`<p>${u.name} : ${u.score}</p>`;
+});
 }
 
+setInterval(loadUsers,2000);
 
-/* ======================
-   NAV
-====================== */
-
-function showPage(page) {
-    ["live", "guide", "dashboard"].forEach(p => {
-        document.getElementById("page-" + p).style.display = "none";
-    });
-
-    document.getElementById("page-" + page).style.display = "block";
+function showPage(p){
+["live","register","dashboard"].forEach(x=>{
+document.getElementById("page-"+x).style.display="none";
+});
+document.getElementById("page-"+p).style.display="block";
 }
 
-
-document.getElementById("btn-start").onclick = startCamera;
-document.getElementById("btn-stop").onclick = stopCamera;
+document.getElementById("btn-start").onclick=startCamera;
+document.getElementById("btn-stop").onclick=stopCamera;
