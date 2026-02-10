@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <title>Helmet AI</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+
+<body>
+
+<nav>
+    <button onclick="showPage('live')">Live</button>
+    <button onclick="showPage('dashboard')">Dashboard</button>
+</nav>
+
+<!-- LIVE -->
+<div id="page-live">
+    <video id="camera" autoplay playsinline></video>
+    <button id="btn-start">Start</button>
+    <button id="btn-stop">Stop</button>
+</div>
+
+<!-- DASHBOARD -->
+<div id="page-dashboard" style="display:none">
+    <h2>Today</h2>
+    <p id="date"></p>
+    <p id="count">0</p>
+    <canvas id="chart" width="400" height="150"></canvas>
+</div>
+
+<script src="/static/script.js"></script>
+</body>
+</html>
